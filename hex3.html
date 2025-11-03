@@ -1,0 +1,450 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+  <title>Hex</title>
+  <style>
+    :root { --bg:#0b1020; --panel:#121933; --muted:#7a87a5; --p1:#ff5a5f; --p2:#5cc9a6; }
+    html, body { height: 100%; margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; background: var(--bg); color: #e7ecff; overscroll-behavior: contain; }
+    .wrap { display: grid; grid-template-columns: 340px 1fr; gap: 16px; height: 100vh; box-sizing: border-box; padding: 16px; }
+    .panel { background: var(--panel); border-radius: 16px; padding: 16px; box-shadow: 0 10px 30px rgba(0,0,0,.25); }
+    .title { margin: 0 0 6px; font-size: 20px; font-weight: 700; letter-spacing: .2px; }
+    .muted { color: var(--muted); font-size: 13px; margin-top: -2px; }
+    .row { display: flex; align-items: center; gap: 10px; margin: 10px 0; }
+    input[type="number"], select { width: 140px; background: #0e1430; color:#e7ecff; border:1px solid #202a52; border-radius:10px; padding:8px 10px; }
+    button { background: #1b2550; color:#e7ecff; border:1px solid #2b3a7a; padding:10px 14px; border-radius:12px; cursor:pointer; transition: .15s transform ease; }
+    button:hover { transform: translateY(-1px); }
+    .badge { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; background:#0f1536; border:1px solid #273067; border-radius:999px; font-size: 12px; }
+    .dot { width: 10px; height: 10px; border-radius: 999px; display:inline-block; }
+    .gridline { color:#a8b3d0; opacity:.6; font-size:12px; }
+    .legend { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size: 12px; background:#0f1536; border:1px solid #253169; border-radius:8px; padding:2px 6px; color:#cfe1ff; }
+    /* Board container fills viewport height on mobile too */
+    .board-wrap { padding:0; position:relative; display:flex; min-height: 0; }
+    canvas { flex:1; width: 100%; height: calc(100vh - 32px); background: #0b1020; border-radius: 16px; box-shadow: inset 0 0 0 1px #1a2249;
+             touch-action: none; -webkit-user-select: none; user-select: none; }
+    @media (max-width: 900px){ .wrap{ grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="panel" id="sidebar">
+      <h1 class="title">Hex</h1>
+      <div class="muted">P1 soldan → sağa, P2 yukarıdan → aşağıya bağlar. Beraberlik yok.</div>
+
+      <div class="row">
+        <label for="size">Tahta boyutu</label>
+        <input id="size" type="number" min="3" max="25" value="11" />
+        <button id="new">Yeni Oyun</button>
+      </div>
+
+      <div class="row">
+        <label for="opponent">Rakip</label>
+        <select id="opponent">
+          <option value="human">İnsan</option>
+          <option value="ai-easy">AI – Kolay</option>
+          <option value="ai-medium" selected>AI – Orta</option>
+          <option value="ai-hard">AI – Zor</option>
+        </select>
+      </div>
+
+      <div class="row legend">
+        <span class="badge"><span class="dot" style="background:var(--p1)"></span> P1 (Kırmızı) – sol→sağ</span>
+        <span class="badge"><span class="dot" style="background:var(--p2)"></span> P2 (Yeşil) – üst→alt</span>
+      </div>
+
+      <div class="row"><strong>Tur:</strong> <span id="turn">P1</span></div>
+      <div class="row"><strong>Durum:</strong> <span id="status">Hamle bekleniyor…</span></div>
+
+      <div style="margin-top:14px; line-height:1.45">
+        <div class="gridline">İpuçları</div>
+        <ul>
+          <li>Hücreye dokunarak/ tıklayarak taş yerleştir.</li>
+          <li><span class="kbd">R</span> ile sıfırla, <span class="kbd">Z</span> ile geri al (undo).</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="panel board-wrap">
+      <canvas id="board"></canvas>
+    </section>
+  </div>
+
+  <script>
+  // Geometry
+  const TAU = Math.PI * 2;
+  function hexPolygonPath(ctx, x, y, r) {
+    const angleOffset = Math.PI / 6;
+    ctx.beginPath();
+    for (let i = 0; i < 6; i++) {
+      const a = angleOffset + TAU * (i / 6);
+      const px = x + r * Math.cos(a);
+      const py = y + r * Math.sin(a);
+      if (i === 0) ctx.moveTo(px, py); else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+  }
+  const DIRS = [ [1,0], [1,-1], [0,-1], [-1,0], [-1,1], [0,1] ];
+
+  // DSU
+  class DSU {
+    constructor(n) { this.p = Array.from({length:n}, (_,i)=>i); this.r = Array(n).fill(0); }
+    f(x){ return this.p[x]===x ? x : (this.p[x]=this.f(this.p[x])); }
+    u(a,b){ a=this.f(a); b=this.f(b); if(a===b) return; if(this.r[a]<this.r[b]) [a,b]=[b,a]; this.p[b]=a; if(this.r[a]===this.r[b]) this.r[a]++; }
+    s(a,b){ return this.f(a)===this.f(b); }
+  }
+
+  // State
+  const state = {
+    n: 11,
+    hexR: 24,
+    cells: [],
+    turn: 1,
+    boardDSU_P1: null,
+    boardDSU_P2: null,
+    virtual: { XL:null, XR:null, YT:null, YB:null },
+    history: [],
+    aiMode: 'ai-medium'
+  };
+
+  const canvas = document.getElementById('board');
+  const ctx = canvas.getContext('2d');
+  const elTurn = document.getElementById('turn');
+  const elStatus = document.getElementById('status');
+
+  function resizeCanvas(){
+    // Explicitly size canvas to its CSS pixels * dpr
+    const dpr = Math.max(1, window.devicePixelRatio || 1);
+    const rect = canvas.getBoundingClientRect();
+    canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+    canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    layoutGrid();
+    draw();
+  }
+
+  function layoutGrid(){
+    const rect = canvas.getBoundingClientRect();
+    const width = rect.width, height = rect.height;
+    const n = state.n;
+    const margin = 24;
+    const maxR_w = (width - 2*margin) / ( (n + 0.5) * Math.sqrt(3) );
+    const maxR_h = (height - 2*margin) / ( (n*1.5) + 0.5 );
+    state.hexR = Math.max(10, Math.floor(Math.min(maxR_w, maxR_h)));
+
+    const R = state.hexR;
+    const startX = margin + (Math.sqrt(3)*R)/2;
+    const startY = margin + R;
+
+    const cells = [];
+    for (let r=0; r<n; r++){
+      for (let q=0; q<n; q++){
+        const x = startX + (q + r/2) * Math.sqrt(3) * R;
+        const y = startY + r * (1.5 * R);
+        cells.push({ q, r, x, y, owner:0 });
+      }
+    }
+    state.cells = cells;
+  }
+
+  function idx(q,r){ return r * state.n + q; }
+
+  function newGame(n){
+    state.n = n;
+    state.turn = 1;
+    state.history = [];
+    layoutGrid();
+    const size = n*n + 4;
+    state.boardDSU_P1 = new DSU(size);
+    state.boardDSU_P2 = new DSU(size);
+    state.virtual = { XL:n*n+0, XR:n*n+1, YT:n*n+2, YB:n*n+3 };
+    for (const c of state.cells) c.owner = 0;
+    syncLabels();
+    draw();
+  }
+
+  function syncLabels(){
+    elTurn.textContent = state.turn === 1 ? 'P1' : 'P2';
+    elStatus.textContent = 'Hamle bekleniyor…';
+  }
+
+  function handleAt(clientX, clientY){
+    const rect = canvas.getBoundingClientRect();
+    const px = clientX - rect.left;
+    const py = clientY - rect.top;
+    placeAtPixel(px, py);
+  }
+
+  // Unified input with feature detection
+  const supportsPointer = 'PointerEvent' in window;
+  if (supportsPointer){
+    canvas.addEventListener('pointerdown', (e)=>{
+      if (state.turn === 0) { e.preventDefault(); return; }
+      if (e.isPrimary === false) { e.preventDefault(); return; }
+      handleAt(e.clientX, e.clientY);
+      e.preventDefault();
+    }, { passive:false });
+  } else {
+    canvas.addEventListener('touchstart', (e)=>{
+      if (state.turn === 0) { e.preventDefault(); return; }
+      const t = e.touches[0];
+      handleAt(t.clientX, t.clientY);
+      e.preventDefault();
+    }, { passive:false });
+    canvas.addEventListener('mousedown', (e)=>{
+      if (state.turn === 0) { e.preventDefault(); return; }
+      handleAt(e.clientX, e.clientY);
+      e.preventDefault();
+    });
+  }
+
+  function placeAtPixel(px, py){
+    const R = state.hexR;
+    for (let i=0;i<state.cells.length;i++){
+      const c = state.cells[i];
+      if (Math.abs(px - c.x) > Math.sqrt(3)*R/2 + 1 || Math.abs(py - c.y) > R + 1) continue;
+      ctx.save();
+      hexPolygonPath(ctx, c.x, c.y, R-0.8);
+      const hit = ctx.isPointInPath(px, py);
+      ctx.restore();
+      if (hit) return tryMove(i);
+    }
+  }
+
+  function tryMove(i){
+    const c = state.cells[i];
+    if (!c || c.owner !== 0) {
+      if (state.turn !== 0) elStatus.textContent = 'Geçersiz: Hücre dolu.';
+      return;
+    }
+    const n = state.n;
+    c.owner = state.turn;
+    state.history.push({ idx:i });
+
+    const v = idx(c.q, c.r);
+    if (state.turn === 1){
+      if (c.q === 0) state.boardDSU_P1.u(v, state.virtual.XL);
+      if (c.q === n-1) state.boardDSU_P1.u(v, state.virtual.XR);
+      for (const [dq, dr] of DIRS){
+        const q2 = c.q + dq, r2 = c.r + dr;
+        if (q2>=0 && q2<n && r2>=0 && r2<n){
+          const nb = state.cells[idx(q2,r2)];
+          if (nb.owner === 1) state.boardDSU_P1.u(v, idx(q2,r2));
+        }
+      }
+    } else {
+      if (c.r === 0) state.boardDSU_P2.u(v, state.virtual.YT);
+      if (c.r === n-1) state.boardDSU_P2.u(v, state.virtual.YB);
+      for (const [dq, dr] of DIRS){
+        const q2 = c.q + dq, r2 = c.r + dr;
+        if (q2>=0 && q2<n && r2>=0 && r2<n){
+          const nb = state.cells[idx(q2,r2)];
+          if (nb.owner === 2) state.boardDSU_P2.u(v, idx(q2,r2));
+        }
+      }
+    }
+
+    draw();
+
+    let winner = null;
+    if (state.turn === 1 && state.boardDSU_P1.s(state.virtual.XL, state.virtual.XR)) winner = 1;
+    if (state.turn === 2 && state.boardDSU_P2.s(state.virtual.YT, state.virtual.YB)) winner = 2;
+
+    if (winner){
+      elStatus.textContent = `Oyun bitti! Kazanan: ${winner===1? 'P1 (Kırmızı)': 'P2 (Yeşil)'}`;
+      state.turn = 0;
+      return;
+    }
+
+    state.turn = (state.turn === 1) ? 2 : 1;
+    syncLabels();
+    scheduleAIMoveIfNeeded();
+  }
+
+  function undo(){
+    if (state.history.length === 0 || state.turn === 0) return;
+    const last = state.history.pop();
+    state.cells[last.idx].owner = 0;
+    const n = state.n;
+    const size = n*n + 4;
+    state.boardDSU_P1 = new DSU(size);
+    state.boardDSU_P2 = new DSU(size);
+    for (let r=0;r<n;r++){
+      for (let q=0;q<n;q++){
+        const i = idx(q,r);
+        const cell = state.cells[i];
+        if (cell.owner===0) continue;
+        const v = i;
+        if (cell.owner===1){
+          if (q===0) state.boardDSU_P1.u(v, state.virtual.XL);
+          if (q===n-1) state.boardDSU_P1.u(v, state.virtual.XR);
+          for (const [dq,dr] of DIRS){
+            const q2=q+dq, r2=r+dr; if(q2<0||q2>=n||r2<0||r2>=n) continue;
+            const nb = state.cells[idx(q2,r2)]; if(nb.owner===1) state.boardDSU_P1.u(v, idx(q2,r2));
+          }
+        } else if (cell.owner===2){
+          if (r===0) state.boardDSU_P2.u(v, state.virtual.YT);
+          if (r===n-1) state.boardDSU_P2.u(v, state.virtual.YB);
+          for (const [dq,dr] of DIRS){
+            const q2=q+dq, r2=r+dr; if(q2<0||q2>=n||r2<0||r2>=n) continue;
+            const nb = state.cells[idx(q2,r2)]; if(nb.owner===2) state.boardDSU_P2.u(v, idx(q2,r2));
+          }
+        }
+      }
+    }
+    state.turn = state.turn===1?2:1;
+    syncLabels();
+    draw();
+  }
+
+  function draw(){
+    const rect = canvas.getBoundingClientRect();
+    ctx.clearRect(0,0,rect.width,rect.height);
+
+    for (const c of state.cells){
+      const fill = c.owner===1 ? getComputedStyle(document.documentElement).getPropertyValue('--p1')
+                 : c.owner===2 ? getComputedStyle(document.documentElement).getPropertyValue('--p2')
+                 : '#0e1533';
+      const stroke = c.owner ? 'rgba(255,255,255,.9)' : 'rgba(180,198,255,.2)';
+      ctx.lineWidth = 1.2;
+      hexPolygonPath(ctx, c.x, c.y, state.hexR-0.8);
+      ctx.fillStyle = fill; ctx.fill();
+      ctx.strokeStyle = stroke; ctx.stroke();
+    }
+
+    const n = state.n, R = state.hexR;
+    const leftX = Math.min(...state.cells.filter(c=>c.q===0).map(c=>c.x)) - (Math.sqrt(3)*R/2);
+    const rightX = Math.max(...state.cells.filter(c=>c.q===n-1).map(c=>c.x)) + (Math.sqrt(3)*R/2);
+    const topY = Math.min(...state.cells.filter(c=>c.r===0).map(c=>c.y)) - R/2;
+    const botY = Math.max(...state.cells.filter(c=>c.r===n-1).map(c=>c.y)) + R/2;
+
+    ctx.globalAlpha = .08; ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--p1');
+    ctx.fillRect(leftX-10, topY-20, 10, botY-topY+40);
+    ctx.fillRect(rightX, topY-20, 10, botY-topY+40);
+    ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--p2');
+    ctx.fillRect(leftX-20, topY-10, rightX-leftX+40, 10);
+    ctx.fillRect(leftX-20, botY, rightX-leftX+40, 10);
+    ctx.globalAlpha = 1;
+  }
+
+  // Events
+  window.addEventListener('resize', ()=>{ resizeCanvas(); });
+  window.addEventListener('orientationchange', ()=> setTimeout(resizeCanvas, 150));
+  document.addEventListener('visibilitychange', ()=> { if (!document.hidden) setTimeout(resizeCanvas, 150); });
+
+  document.getElementById('new').addEventListener('click', ()=>{
+    const size = Math.max(3, Math.min(25, parseInt(document.getElementById('size').value||11)));
+    document.getElementById('size').value = size;
+    newGame(size);
+  });
+  document.getElementById('opponent').addEventListener('change', (e)=>{
+    state.aiMode = e.target.value;
+    scheduleAIMoveIfNeeded();
+  });
+
+  // AI helpers
+  function validMoves(owners){
+    const res=[]; for(let i=0;i<state.cells.length;i++){ if((owners? owners[i]:state.cells[i].owner)===0) res.push(i); }
+    return res;
+  }
+  function scheduleAIMoveIfNeeded(){
+    if (state.turn===2 && state.aiMode!=='human' && state.turn!==0){
+      setTimeout(()=>{ aiPlay(); }, 120);
+    }
+  }
+  function aiPlay(){
+    const mode = state.aiMode;
+    const choice = aiChooseMove(mode);
+    if (choice!=null) tryMove(choice);
+  }
+  function aiChooseMove(mode){
+    const moves = validMoves(); if(moves.length===0) return null;
+    if (mode==='ai-easy'){
+      return moves[Math.floor(Math.random()*moves.length)];
+    }
+    if (mode==='ai-medium'){
+      let best=null, bestScore=-1e9;
+      for (const m of moves){
+        const owners = state.cells.map(c=>c.owner);
+        owners[m]=2;
+        const my = connectionCost(owners, 2);
+        const opp = connectionCost(owners, 1);
+        const s = (100 - my) + (opp*0.3);
+        if (s>bestScore){ bestScore=s; best=m; }
+      }
+      return best;
+    }
+    const baseOwners = state.cells.map(c=>c.owner);
+    const scored = moves.map(m=>{
+      const owners=baseOwners.slice(); owners[m]=2; 
+      return {m, score: (100-connectionCost(owners,2)) + (connectionCost(owners,1)*0.3)};
+    }).sort((a,b)=>b.score-a.score).slice(0, Math.min(10, moves.length));
+    const budget = Math.max(200, 40*scored.length);
+    let best=scored[0].m, bestWin=-1;
+    for (const cand of scored){
+      let wins=0, tries=0; const per = Math.floor(budget/scored.length);
+      for (let t=0;t<per;t++){
+        if (simulateRandomPlayout(baseOwners, cand.m)) wins++;
+        tries++;
+      }
+      const wr = wins/Math.max(1,tries);
+      if (wr>bestWin){ bestWin=wr; best=cand.m; }
+    }
+    return best;
+  }
+  function connectionCost(owners, player){
+    const n=state.n; const N=n*n; const inf=1e9;
+    const dequeQ=[]; const pushFront=(x)=>dequeQ.unshift(x); const pushBack=(x)=>dequeQ.push(x);
+    const popFront=()=>dequeQ.shift();
+    const dist=new Array(N).fill(inf);
+    if (player===1){
+      for(let r=0;r<n;r++){ const i=idx(0,r); if(owners[i]!==2){ dist[i]= owners[i]===1?0:1; pushBack(i);} }
+      while(dequeQ.length){
+        const v=popFront(); const q=v%n, r=Math.floor(v/n);
+        for(const [dq,dr] of DIRS){ const q2=q+dq, r2=r+dr; if(q2<0||q2>=n||r2<0||r2>=n) continue; const u=idx(q2,r2);
+          if(owners[u]===2) continue; const w = dist[v] + (owners[u]===1?0:1); if(w<dist[u]){ dist[u]=w; (owners[u]===1?pushFront:pushBack)(u);} }
+      }
+      let best=inf; for(let r=0;r<n;r++){ best=Math.min(best, dist[idx(n-1,r)]); } return best;
+    } else {
+      for(let q=0;q<n;q++){ const i=idx(q,0); if(owners[i]!==1){ dist[i]= owners[i]===2?0:1; pushBack(i);} }
+      while(dequeQ.length){
+        const v=popFront(); const q=v%n, r=Math.floor(v/n);
+        for(const [dq,dr] of DIRS){ const q2=q+dq, r2=r+dr; if(q2<0||q2>=n||r2<0||r2>=n) continue; const u=idx(q2,r2);
+          if(owners[u]===1) continue; const w = dist[v] + (owners[u]===2?0:1); if(w<dist[u]){ dist[u]=w; (owners[u]===2?pushFront:pushBack)(u);} }
+      }
+      let best=inf; for(let q=0;q<n;q++){ best=Math.min(best, dist[idx(q,n-1)]); } return best;
+    }
+  }
+  function simulateRandomPlayout(owners, firstMove){
+    const n = state.n; const N=n*n;
+    const b = owners.slice(); b[firstMove]=2;
+    let turn = 1;
+    if (winnerOnBoard(b)===2) return true;
+    const avail=[]; for(let i=0;i<N;i++) if(b[i]===0) avail.push(i);
+    for(let i=avail.length-1;i>0;i--){ const j=(Math.random()* (i+1))|0; [avail[i],avail[j]]=[avail[j],avail[i]]; }
+    let k=0;
+    while(k<avail.length){ b[avail[k++]]=turn; const w = winnerOnBoard(b); if(w){ return w===2; } turn = 3 - turn; }
+    const w = winnerOnBoard(b); return w===2;
+  }
+  function winnerOnBoard(owners){
+    const n=state.n; const size=n*n+4; const d1=new DSU(size), d2=new DSU(size);
+    const V={ XL:n*n, XR:n*n+1, YT:n*n+2, YB:n*n+3 };
+    for(let r=0;r<n;r++) for(let q=0;q<n;q++){
+      const i=idx(q,r); const o=owners[i];
+      if(o===1){ if(q===0) d1.u(i,V.XL); if(q===n-1) d1.u(i,V.XR);
+        for(const [dq,dr] of DIRS){ const q2=q+dq, r2=r+dr; if(q2<0||q2>=n||r2<0||r2>=n) continue; const j=idx(q2,r2); if(owners[j]===1) d1.u(i,j); }
+      } else if(o===2){ if(r===0) d2.u(i,V.YT); if(r===n-1) d2.u(i,V.YB);
+        for(const [dq,dr] of DIRS){ const q2=q+dq, r2=r+dr; if(q2<0||q2>=n||r2<0||r2>=n) continue; const j=idx(q2,r2); if(owners[j]===2) d2.u(i,j); }
+      }
+    }
+    if (d1.s(V.XL,V.XR)) return 1; if (d2.s(V.YT,V.YB)) return 2; return 0;
+  }
+
+  // Start
+  resizeCanvas();
+  newGame(11);
+  scheduleAIMoveIfNeeded();
+  </script>
+</body>
+</html>
